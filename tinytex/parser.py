@@ -38,13 +38,66 @@ class UserCommand(object):
     pass
 
 class OldStyleNewCommand(UserCommand):
+    """
+    \newcommand and \renewcommand
+
+    \(re)newcommand{\cmd}{defn}
+    \(re)newcommand{\cmd}[nargs]{defn}
+    \(re)newcommand{\cmd}[nargs][optargdefault]{defn}
+
+    There are *-versions of this available which do not support multiple
+
+    nargs and optargdefault — The handling of which is complicated
+    and explained below. This is implemented in call().
+
+    nargs
+
+    Optional; an integer from 0 to 9, specifying the number of
+    arguments that the command takes, including any optional
+    argument. Omitting this argument is the same as specifying 0,
+    meaning that the command has no arguments. If you redefine a
+    command, the new version can have a different number of arguments
+    than the old version.
+
+    optargdefault
+
+    Optional; if this argument is present then the first argument of
+    \cmd is optional, with default value optargdefault (which may be
+    the empty string). If optargdefault is not present then \cmd does
+    not take an optional argument.
+
+    That is, if \cmd is called with a following argument in square
+    brackets, as in \cmd[optval]{...}..., then within defn the
+    parameter #1 is set to optval. On the other hand, if \cmd is
+    called without following square brackets then within defn the
+    parameter #1 is set to optargdefault. In either case, the required
+    arguments start with #2.
+
+    Omitting [optargdefault] from the definition is entirely different
+    from giving the square brackets with empty contents, as in []. The
+    former says the command being defined takes no optional argument,
+    so #1 is the first required argument (if nargs ≥ 1); the latter
+    sets the optional argument #1 to the empty string as the default,
+    if no optional argument was given in the call.
+
+    Similarly, omitting [optval] from a call is also entirely
+    different from giving the square brackets with empty contents. The
+    former sets #1 to the value of optval (assuming the command was
+    defined to take an optional argument); the latter sets #1 to the
+    empty string, just as with any other value.
+
+    If a command is not defined to take an optional argument, but is
+    called with an optional argument, the results are unpredictable:
+    there may be a LaTeX error, there may be incorrect typeset output,
+    or both.
+
+    https://latexref.xyz/_005cnewcommand-_0026-_005crenewcommand.html
+    """
     def __init__(self, command):
         self.command = command
-        self.params = command.params
+        optparams = command.optional_parameters
+        self.rparams = command.required_parameters
 
-        optparams = [p
-                     for p in self.params
-                     if isinstance(p, OptionalParameter)]
         if len(optparams) == 0:
             self.nargs = 0
             self.optargdefault = None
@@ -56,15 +109,12 @@ class OldStyleNewCommand(UserCommand):
                 raise UserCommandParseError(
                     f"Can’t parse number of arguments “{nargs}”",
                     location=self.command.parser_location)
+
         if len(optparams) > 1:
             self.optargdefault = str(optparams[-1])
-
-        if not self.optargdefault:
-            self.optargdefault = None
-
-        self.rparams = [p
-                     for p in self.params
-                     if isinstance(p, RequiredParameter)]
+            self.wants_optional_parameter = True
+        else:
+            self.wants_optional_parameter = False
 
         if len(self.rparams) != 2:
             raise UserCommandParseError(
@@ -84,14 +134,43 @@ class OldStyleNewCommand(UserCommand):
 
     @property
     def definition(self):
-        yield from self.params[-1].children
+        yield from self.rparams[-1].children
 
     def call(self, command):
         """
         Return a recursive copy of our definition with the placeholders
         replaced by the call’s parameters.
         """
-        parameters = tuple(command.children)
+        parameters = []
+
+        if self.wants_optional_parameter:
+            optional = command.optional_parameters
+            required = command.required_parameters
+
+            if len(optional) == 0:
+                parameters.append(self.optargdefault)
+            elif len(optional) == 1:
+                parameters.append(optional[0])
+            else:
+                r = repr(optional)
+                raise UserCommandParseError(
+                    f"Calling {self.name}: "
+                    f"There can only be one optional parameter with "
+                    f"old-style user commands, not: {r}",
+                    location=self.command.parser_location)
+
+            parameters += list(required)
+        else:
+            # If the command is called with bracket-parameters for parameters
+            # considered required here, they will still work. It all depends
+            # on their order, anyway.
+            parameters = command.parameters
+
+        if len(parameters) != self.nargs:
+            raise UserCommandParseError(
+                f"User defined {self.name} "
+                f"required {self.nargs} arguments, not {repr(parameters)}.",
+                location=self.command.parser_location)
 
         def walk(nodes):
             for node in nodes:
@@ -259,11 +338,21 @@ class Command(Node):
         return super().append(child)
 
     @property
-    def params(self):
+    def parameters(self):
         """
         Return a list of command parameters.
         """
         return tuple(self._children)
+
+    @property
+    def optional_parameters(self):
+        return tuple([p for p in self._children
+                      if isinstance(p, OptionalParameter)])
+
+    @property
+    def required_parameters(self):
+        return tuple([p for p in self._children
+                      if isinstance(p, RequiredParameter)])
 
 class OptionalParameter(Node):
     pass
@@ -416,7 +505,6 @@ class TexParser(Parser):
         print("*"*60)
         user_commands = root.find_user_commands()
         user_commands_by_name = dict([(c.name, c) for c in user_commands])
-        ic(user_commands_by_name)
         root = root.resolve_user_commands(user_commands_by_name)
 
         root.print()
