@@ -50,10 +50,10 @@ t_close_oparam = r"\]"
 t_open_curly = r"\{"
 t_close_curly = r"\}"
 
-t_linebreak = r"\\\\"
+t_linebreak = r"\\\\\n"
 
 def t_eols(t):
-    r"\n\n+"
+    r"\n\n+\s*"
     t.value = "\n" * t.value.count("\n")
     return t
 
@@ -61,7 +61,8 @@ t_comment = "%.*?[\n$]\s*"
 t_whitespace = r"[ \t]+|\n(?!\n)"
 
 t_placeholder = r"#(\d+)"
-t_word = r"\w[\w \t]*\w"
+chars = r"\w„“”\.!\?;,‘’"
+t_word = f"[{chars}][{chars} \t]*[{chars}]"
 t_text = r"."
 
 def t_error(t):
