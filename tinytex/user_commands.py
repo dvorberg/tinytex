@@ -13,12 +13,16 @@
 # GNU General Public License for more details.
 
 from functools import cached_property
+from collections import deque
 
 from tinymarkup.exceptions import ParseError
 from .nodes import (RootReached, Node, Root, Environment, Command,
                     OptionalParameter, RequiredParameter,
                     LineBreak, ParagraphBreak, BeginScope, EndScope,
                     Whitespace, Text, Placeholder)
+
+class UserCommandParseError(ParseError):
+    pass
 
 def find_user_commands(root):
     r"""
@@ -29,9 +33,9 @@ def find_user_commands(root):
     children = iter(root.children)
     for child in children:
         if isinstance(child, Command):
-            if child.command in { "newcommand", "renewcommand", }:
+            if child.name in { "newcommand", "renewcommand", }:
                 yield OldStyleNewCommand(child)
-            elif child.command == "NewDocumentCommand":
+            elif child.name == "NewDocumentCommand":
                 yield XParseDocumentCommand(child, next(children))
         else:
             for cmd in find_user_commands(child):
@@ -48,17 +52,31 @@ def resolve_user_commands(root, extra_user_commands={}):
 
     def process(node):
         def newchildren(children):
+            scopes = {}
             for child in children:
                 if isinstance(child, Command):
-                    if child.command in { "newcommand", "renewcommand",
-                                          "NewDocumentCommand",}:
+                    if child.name in { "newcommand", "renewcommand" }:
                         pass
-                    elif child.command in user_commands:
-                        usercmd = user_commands[child.command]
+                    elif child.name == "NewDocumentCommand":
+                        # Skip the next command node so the
+                        # command definition does not get called.
+                        next(children)
+                    elif child.name in user_commands:
+                        usercmd = user_commands[child.name]
                         for newnode in usercmd.call(child):
                             yield process(newnode)
                     else:
                         yield process(child)
+                elif isinstance(child, BeginScope):
+                    newbegin = child.copy() # No need to process().
+                    scopes[child] = newbegin
+                    yield newbegin
+                elif isinstance(child, EndScope):
+                    newend = child.copy()
+                    newbegin = scopes[child.begin]
+                    newbegin.end = newend
+                    newend.begin = newbegin
+                    yield newend
                 else:
                     yield process(child)
 
@@ -66,14 +84,82 @@ def resolve_user_commands(root, extra_user_commands={}):
 
     return process(root)
 
-
-
-
-class UserCommandParseError(ParseError):
+class Argument(object):
     pass
+
+class Mandetory(Argument):
+    pass
+
+class Optional(Argument):
+    def __init__(self, default=None):
+        self.default = default
+
+    @classmethod
+    def from_nodes(Optional, letter, nodes):
+        begin = next(nodes)
+        if not isinstance(begin, BeginScope):
+            raise UserCommandParseError(
+                "“O” argument must be "
+                "followed by {}-Scope.",
+                location=self.parser_location)
+
+        end = begin.end
+        scope = begin.assemble()
+
+        here = next(nodes)
+        while not here is end:
+            here = next(nodes)
+
+        return Optional(scope)
+
+
+    def __repr__(self):
+        return f"<{self.__class__.__name__} {{{repr(self.default)}}}"
+
 
 class UserCommand(object):
-    pass
+    def call(self, command):
+        """
+        Return a recursive copy of our definition with the placeholders
+        replaced by the call’s parameters.
+        """
+        rparams = deque(command.required_parameters)
+        oparams = deque(command.optional_parameters)
+
+        def argument_values():
+            for spec in self.argspecs:
+                if isinstance(spec, Mandetory):
+                    yield rparams.popleft().children
+                elif isinstance(spec, Optional):
+                    if oparams:
+                        arg = oparams.popleft()
+                    else:
+                        arg = None
+
+                    if arg is None:
+                        yield spec.default
+                    else:
+                        yield arg.children
+                else:
+                    raise TypeError()
+
+        try:
+            parameters = tuple(argument_values())
+        except IndexError as ie:
+            raise UserCommandParseError(
+                f"Mismatch of arguments between definition and call of "
+                f"“\\{command.command}”.",
+                location=command.parser_location) from ie
+
+        def walk(nodes):
+            for node in nodes:
+                if isinstance(node, Placeholder):
+                    yield from parameters[node.no-1]
+                else:
+                    yield node.copy(walk(node._children))
+
+        yield from walk(self.definition)
+
 
 class OldStyleNewCommand(UserCommand):
     """
@@ -132,33 +218,44 @@ class OldStyleNewCommand(UserCommand):
     https://latexref.xyz/_005cnewcommand-_0026-_005crenewcommand.html
     """
     def __init__(self, command):
-        self.command = command
+        super().__init__()
+
+        self.parser_location = command.parser_location
+
         optparams = command.optional_parameters
-        self.rparams = command.required_parameters
+        self.rparams = rparams = command.required_parameters
 
         if len(optparams) == 0:
-            self.nargs = 0
-            self.optargdefault = None
+            nargs = 0
+            optargdefault = None
         elif len(optparams) > 0:
-            nargs = str(optparams[0])
             try:
-                self.nargs = int(nargs)
+                nargs = int(str(optparams[0]))
             except ValueError:
                 raise UserCommandParseError(
                     f"Can’t parse number of arguments “{nargs}”",
                     location=self.command.parser_location)
 
         if len(optparams) > 1:
-            self.optargdefault = str(optparams[-1])
-            self.wants_optional_parameter = True
+            optargdefault = str(optparams[-1])
+            wants_optional_parameter = True
         else:
-            self.wants_optional_parameter = False
+            wants_optional_parameter = False
 
         if len(self.rparams) != 2:
             raise UserCommandParseError(
                 f"\(re)newcommand requires two parameters.",
                 location=self.command.parser_location)
 
+        argspecs = []
+        if wants_optional_parameter:
+            argspecs.append(Optional(Text(optargdefault)))
+            nargs -= 1
+
+        for a in range(nargs):
+            argspecs.append(Mandetory())
+
+        self.argspecs = tuple(argspecs)
 
     @cached_property
     def name(self):
@@ -168,61 +265,44 @@ class OldStyleNewCommand(UserCommand):
                 "\(re)newcommand’s first param "
                 "must be a command to (re-)define.",
                 location=self.command.parser_location)
-        return command.command
+        return command.name
 
     @property
     def definition(self):
         yield from self.rparams[-1].children
-
-    def call(self, command):
-        """
-        Return a recursive copy of our definition with the placeholders
-        replaced by the call’s parameters.
-        """
-        parameters = []
-
-        if self.wants_optional_parameter:
-            optional = command.optional_parameters
-            required = command.required_parameters
-
-            if len(optional) == 0:
-                parameters.append(self.optargdefault)
-            elif len(optional) == 1:
-                parameters.append(optional[0])
-            else:
-                r = repr(optional)
-                raise UserCommandParseError(
-                    f"Calling {self.name}: "
-                    f"There can only be one optional parameter with "
-                    f"old-style user commands, not: {r}",
-                    location=self.command.parser_location)
-
-            parameters += list(required)
-        else:
-            # If the command is called with bracket-parameters for parameters
-            # considered required here, they will still work. It all depends
-            # on their order, anyway.
-            parameters = command.parameters
-
-        if len(parameters) != self.nargs:
-            raise UserCommandParseError(
-                f"User defined {self.name} "
-                f"required {self.nargs} arguments, not {repr(parameters)}.",
-                location=self.command.parser_location)
-
-        def walk(nodes):
-            for node in nodes:
-                if isinstance(node, Placeholder):
-                    yield Text(str(parameters[node.no-1]))
-                else:
-                    yield node.copy(walk(node._children))
-
-        yield from walk(self.definition)
-
 
     def __repr__(self):
         me = self.__class__.__name__
         return f"<{me}({self.nargs}, {repr(self.optargdefault)})>"
 
 class XParseDocumentCommand(UserCommand):
-    pass
+    def __init__(self, command, newcommand):
+        super().__init__()
+
+        self.parser_location = command.parser_location
+        self.name = newcommand.name
+
+        if len(newcommand.required_parameters) != 2:
+            raise UserCommandParseError(
+                "NewDocumentCommand must provide the command with two required "
+                "parameters: argspec and the definition body.",
+                location=self.parser_location)
+
+        argspecs, definition = newcommand.required_parameters
+        self.argspecs = tuple(self.parse_argspecs(argspecs))
+        self.definition = definition.children
+
+    def parse_argspecs(self, rargs):
+        nodes = rargs.children
+        for node in nodes:
+            if isinstance(node, Text):
+                letters = node.text
+                for letter in letters:
+                    if letter in " \t\n":
+                        pass
+                    elif letter == "m":
+                        yield Mandetory()
+                    elif letter == "o":
+                        yield Optional()
+                    elif letter == "O":
+                        yield Optional.from_nodes(node, nodes)
