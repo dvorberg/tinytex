@@ -19,7 +19,6 @@ import ply.lex
 from tinymarkup.exceptions import (InternalError, ParseError, UnknownMacro,
                                    Location, UnsuitableMacro)
 from tinymarkup.parser import Parser
-#from tinymarkup.res import paragraph_break_re
 
 from .compiler import TexCompiler
 from . import lextokens
@@ -27,8 +26,7 @@ from .nodes import (RootReached, Node, Root, Environment, Command,
                     OptionalParameter, RequiredParameter,
                     LineBreak, ParagraphBreak, BeginScope, EndScope,
                     Whitespace, Text, Placeholder)
-from .user_commands import (resolve_user_commands,
-                            OldStyleNewCommand, XParseDocumentCommand)
+from .user_commands import resolve_user_commands
 
 tex_base_lexer = ply.lex.lex(module=lextokens,
                              reflags=re.MULTILINE|re.IGNORECASE|re.DOTALL,
@@ -41,6 +39,8 @@ class TexParser(Parser):
 
     def parse(self, source:str, compiler:TexCompiler):
         root = here = Root()
+        scope_stack = []
+
         for token in self.lexer.tokenize(source):
             def require_context(NodeClass):
                 if not isinstance(here, NodeClass):
@@ -49,9 +49,17 @@ class TexParser(Parser):
 
             match token.type:
                 case "begin_environment":
+                    if scope_stack:
+                        raise ParseError("Can’t begin an environment within "
+                                         "a scope.", location=self.location)
+
                     here = here.append(Environment(token.value))
 
                 case "end_environment":
+                    if scope_stack:
+                        raise ParseError("Environment not closed.",
+                                         location=self.location)
+
                     try:
                         here = here.walk_up_to(Environment)
                     except RootReached:
@@ -70,7 +78,9 @@ class TexParser(Parser):
                     # Locations are (rather) expensive. Let’s not create
                     # one for each command.
                     if token.value in { "newcommand", "renewcommand",
-                                        "NewDocumentCommand",}:
+                                        # These currently won’t work.
+                                        # "newcommand*", "renewcommand*",
+                                        "NewDocumentCommand", }:
                         location = self.location
                     else:
                         location = None
@@ -93,20 +103,32 @@ class TexParser(Parser):
                     if isinstance(here, Command):
                         here = here.append(RequiredParameter())
                     else:
-                        here.append(BeginScope())
+                        begin = BeginScope(self.location)
+                        scope_stack.append(begin)
+                        here.append(begin)
 
                 case "close_curly":
-                    if isinstance(here, Command):
-                        # There was a command without parameters.
-                        try:
-                            here = here.parent.walk_up_to(Command)
-                        except RootReached:
-                            pass
-                    elif isinstance(here, RequiredParameter):
-                        # This is the end of a RequiredParameter
-                        here = here.walk_up_to(Command)
+                    if scope_stack:
+                        begin = scope_stack.pop()
+                        end = EndScope()
+
+                        end.begin = begin
+                        begin.end = end
+                        here.append(end)
                     else:
-                        here.append(EndScope())
+                        if isinstance(here, Command):
+                            # There was a command without parameters.
+                            try:
+                                here = here.parent.walk_up_to(Command)
+                            except RootReached:
+                                pass
+                        elif isinstance(here, RequiredParameter):
+                            # This is the end of a RequiredParameter
+                            here = here.walk_up_to(Command)
+                        else:
+                            # A } without context.
+                            raise ParseError("Closing curly brace without "
+                                             "opening.", location=self.location)
 
                 case "linebreak":
                     here.append(LineBreak())
@@ -131,6 +153,8 @@ class TexParser(Parser):
                     here.append(Placeholder(token.value))
 
                 case "word"|"text":
+                    if isinstance(here, Command):
+                        here = here.parent
                     here.append(Text(token.value))
 
         root.print()
