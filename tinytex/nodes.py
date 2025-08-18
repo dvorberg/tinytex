@@ -13,11 +13,19 @@
 # GNU General Public License for more details.
 
 from io import StringIO
+from functools import cached_property
+from tinymarkup.exceptions import ParseError
 
 class RootReached(Exception):
     pass
 
 class Node(object):
+    """
+    Nodes are consided immutable objects once the parser has
+    run. (Property) functions that depend on append() may be cached
+    because after the parser is done, append() will not be called
+    again.
+    """
     def __init__(self):
         self._children = []
 
@@ -76,7 +84,7 @@ class Node(object):
             info = f" “{info}” "
         return f"{self.__class__.__name__}{info}({len(self._children)})"
 
-    @property
+    @cached_property
     def text(self):
         ret = StringIO()
         for node in self.walk(FlatNode):
@@ -126,6 +134,14 @@ class Command(Node):
     def __init__(self, command, parser_location=None):
         super().__init__()
         self.command = command
+
+        if command[-1] == "*":
+            self.asterisk = True
+            self.name = command[:-1]
+        else:
+            self.asterisk = False
+            self.name = command
+
         self.parser_location = parser_location
 
     def copy(self, children):
@@ -138,22 +154,22 @@ class Command(Node):
 
     def append(self, child):
         assert isinstance(child, (OptionalParameter,
-                                  RequiredParameter)), TypeError
+                                  RequiredParameter)), TypeError(repr(child))
         return super().append(child)
 
-    @property
+    @cached_property
     def parameters(self):
         """
         Return a list of command parameters.
         """
         return tuple(self._children)
 
-    @property
+    @cached_property
     def optional_parameters(self):
         return tuple([p for p in self._children
                       if isinstance(p, OptionalParameter)])
 
-    @property
+    @cached_property
     def required_parameters(self):
         return tuple([p for p in self._children
                       if isinstance(p, RequiredParameter)])
@@ -177,11 +193,41 @@ class FlatNode(Node):
     def __str__(self):
         raise NotImplemented()
 
-class BeginScope(FlatNode):
-    # This is an open curly brace that’s not a paramter.
+    def __repr__(self):
+        return f"{self.__class__.__name__}(-)"
+
+
+class ScopeDelim(FlatNode):
     pass
 
-class EndScope(FlatNode):
+class BeginScope(ScopeDelim):
+    # This is an open curly brace that’s not a paramter.
+
+    def __init__(self, parser_location):
+        super().__init__()
+        self.parser_location = parser_location
+
+    def copy(self, children):
+        raise NotImplemented()
+
+    def assemble(self):
+        """
+        The parser sets self.begin and self.end on matching BeginScope
+        with EndScope. We yield all our siblings, starting with the one
+        after us, ending with the one before the EndScope.
+        """
+        if not hasattr(self, "end"):
+            raise ParseError("Scope not yet closed.")
+
+        siblings = list(self.parent.children)
+        while siblings and siblings[0] != self:
+            siblings.pop(0)
+        siblings.pop(0) # Drop self
+
+        while siblings[0] != self.end:
+            yield siblings.pop(0)
+
+class EndScope(ScopeDelim):
     # This is an closing curly brace that’s not a paramter.
     pass
 
