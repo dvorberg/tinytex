@@ -6,4 +6,15 @@ Hallo
 \fcite[100]{bible}
 
 Welt
+
+
+\NewDocumentCommand\Test{O{I’m the default value} m}{% 
+   I don’t actually do anything #1 #2.
+}
+
+\Test[I am the default param.
+
+And I have two paragraphs. 
+]{second}
+
 \end{document}
