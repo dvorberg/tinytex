@@ -52,7 +52,7 @@ def resolve_user_commands(root, extra_user_commands={}):
 
     def process(node):
         def newchildren(children):
-            scopes = {}
+            scopes = []
             for child in children:
                 if isinstance(child, Command):
                     if child.name in { "newcommand", "renewcommand" }:
@@ -69,11 +69,11 @@ def resolve_user_commands(root, extra_user_commands={}):
                         yield process(child)
                 elif isinstance(child, BeginScope):
                     newbegin = child.copy() # No need to process().
-                    scopes[child] = newbegin
+                    scopes.append(newbegin)
                     yield newbegin
                 elif isinstance(child, EndScope):
                     newend = child.copy()
-                    newbegin = scopes[child.begin]
+                    newbegin = scopes.pop()
                     newbegin.end = newend
                     newend.begin = newbegin
                     yield newend
