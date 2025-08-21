@@ -28,6 +28,7 @@ class Node(object):
     """
     def __init__(self):
         self._children = []
+        self.scope_stack = []
 
     def append(self, child):
         self._children.append(child)
@@ -196,6 +197,13 @@ class FlatNode(Node):
     def __repr__(self):
         return f"{self.__class__.__name__}(-)"
 
+    def copy(self, children=[]):
+        children = list(children)
+        if len(children) > 0:
+            raise ValueError(f"{self.__class__.__name__} may not "
+                             f"contain child notes.")
+        return self.__class__()
+
 
 class ScopeDelim(FlatNode):
     pass
@@ -207,8 +215,8 @@ class BeginScope(ScopeDelim):
         super().__init__()
         self.parser_location = parser_location
 
-    def copy(self, children):
-        raise NotImplemented()
+    def copy(self, children=[]):
+        return self.__class__(self.parser_location)
 
     def assemble(self):
         """
