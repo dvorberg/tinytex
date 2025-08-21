@@ -39,8 +39,6 @@ class TexParser(Parser):
 
     def parse(self, source:str, compiler:TexCompiler):
         root = here = Root()
-        scope_stack = []
-
         for token in self.lexer.tokenize(source):
             def require_context(NodeClass):
                 if not isinstance(here, NodeClass):
@@ -49,14 +47,14 @@ class TexParser(Parser):
 
             match token.type:
                 case "begin_environment":
-                    if scope_stack:
+                    if here.scope_stack:
                         raise ParseError("Can’t begin an environment within "
                                          "a scope.", location=self.location)
 
                     here = here.append(Environment(token.value))
 
                 case "end_environment":
-                    if scope_stack:
+                    if here.scope_stack:
                         raise ParseError("Environment not closed.",
                                          location=self.location)
 
@@ -104,12 +102,13 @@ class TexParser(Parser):
                         here = here.append(RequiredParameter())
                     else:
                         begin = BeginScope(self.location)
-                        scope_stack.append(begin)
+                        here.scope_stack.append(begin)
                         here.append(begin)
 
                 case "close_curly":
-                    if scope_stack:
-                        begin = scope_stack.pop()
+                    if here.scope_stack:
+                        begin = here.scope_stack.pop()
+
                         end = EndScope()
 
                         end.begin = begin
@@ -117,18 +116,22 @@ class TexParser(Parser):
                         here.append(end)
                     else:
                         if isinstance(here, Command):
-                            # There was a command without parameters.
+                            # There was a command without parameters?
                             try:
                                 here = here.parent.walk_up_to(Command)
                             except RootReached:
-                                pass
+                                raise ParseError(
+                                    "Closing curly brace without opening (1).",
+                                    location=self.location)
+
                         elif isinstance(here, RequiredParameter):
                             # This is the end of a RequiredParameter
                             here = here.walk_up_to(Command)
                         else:
                             # A } without context.
-                            raise ParseError("Closing curly brace without "
-                                             "opening.", location=self.location)
+                            raise ParseError(
+                                "Closing curly brace without opening (2).",
+                                location=self.location)
 
                 case "linebreak":
                     here.append(LineBreak())
@@ -157,7 +160,4 @@ class TexParser(Parser):
                         here = here.parent
                     here.append(Text(token.value))
 
-        root.print()
-        print("*"*60)
         root = resolve_user_commands(root)
-        root.print()
